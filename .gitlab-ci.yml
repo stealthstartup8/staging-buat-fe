@@ -1,0 +1,95 @@
+variables:
+  IMAGE_NAME: "${CI_REGISTRY}/${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}"
+  IMAGE_TAG: "${CI_PROJECT_NAME}.${CI_COMMIT_SHORT_SHA}"
+
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_TARGET_BRANCH_PROTECTED == "false"
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+stages:
+  - build
+  - deploy
+
+build nextjs production:
+  stage: build
+  image: oven/bun:1.1.17-debian
+  artifacts:
+    untracked: false
+    when: on_success
+    access: all
+    expire_in: "30 days"
+    name: build_output
+    paths:
+      - .next
+  before_script:
+    - cp $ENV_FILE .env
+    - bun --version
+  script:
+    - |
+      bun install --frozen-lockfile
+      bun install sharp@0.32.6 --ignore-engines
+      bun run build
+  after_script:
+    - rm -v .env
+
+.build_image:
+  image: docker:24.0.5
+  stage: deploy
+  needs:
+    - job: build nextjs production
+      artifacts: true
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - echo $CI_JOB_TOKEN | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    - echo $CI_REGISTRY_IMAGE
+  script:
+    - |
+      docker build -f Dockerfile.gitlab \
+      -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA \
+      -t $CI_REGISTRY_IMAGE \
+      --no-cache .
+    - docker push $CI_REGISTRY_IMAGE --all-tags
+
+build and push docker image:production:
+  extends: .build_image
+  rules:
+    - if: $CI_COMMIT_REF_NAME != $CI_DEFAULT_BRANCH
+      variables:
+        CI_REGISTRY_IMAGE: "$CI_REGISTRY_IMAGE/master"
+
+build and push docker image:staging:
+  extends: .build_image
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+      variables:
+        CI_REGISTRY_IMAGE: "$CI_REGISTRY_IMAGE/staging"
+
+deploy to server:
+  allow_failure: true
+  when: manual
+  tags:
+    - proxmox-dev
+  stage: deploy
+  needs: ["build and push docker image:staging"]
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+  variables:
+    CI_REGISTRY_IMAGE: "$CI_REGISTRY_IMAGE/staging"
+    COMMANDS:
+      "echo $CI_JOB_TOKEN | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin &&
+      docker ps -aqf name=$CI_PROJECT_NAME | xargs docker rm -f 2>/dev/null || true &&
+      docker run --name $CI_PROJECT_NAME \
+      --env APP_VERSION=$IMAGE_TAG \
+      --restart unless-stopped \
+      --pull=always \
+      --detach \
+      $CI_REGISTRY_IMAGE"
+  before_script:
+    - chmod 400 $SSH_PRIVATE_KEY
+  script:
+    - ssh -o StrictHostKeyChecking=no -i $SSH_PRIVATE_KEY -p $SERVER_PORT $SERVER_USER@$SERVER_IP $COMMANDS

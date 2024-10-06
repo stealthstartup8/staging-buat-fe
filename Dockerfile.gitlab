@@ -1,0 +1,23 @@
+FROM node:18.20-alpine3.19
+
+LABEL com.centurylinklabs.watchtower.enable=true
+LABEL maintainer="Rizul Hanif"
+LABEL developer="Mahaasin && Rifdo"
+
+WORKDIR /app
+
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --chown=nextjs:nodejs .next/standalone /app
+COPY --chown=nextjs:nodejs .next/static /app/.next/static
+COPY --chown=nextjs:nodejs public /app/public
+
+USER nextjs
+
+EXPOSE 3000
+
+ENV NEXT_SHARP_PATH /app/node_modules/sharp
+ENV PORT 3000
+
+CMD ["node", "server.js"]
